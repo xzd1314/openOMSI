@@ -303,6 +303,10 @@ pub struct DriverFigure {
     /// Per mesh and vertex, the arm (upper arm and forearm) it belongs to (0 left, 1 right,
     /// -1 none): used to fold each upper arm onto its own elbow in the cab view.
     arm_of: Vec<Vec<i8>>,
+    /// Per mesh and vertex, whether it belongs to the head (head bone weight > 0.5): in the
+    /// cab view the head is folded onto its own centre so the driver's own view shows the
+    /// body without the head in front of the eyes (local modification).
+    head_of: Vec<Vec<bool>>,
     blend: (Vec<Vec3>, Vec<Vec3>),
     /// The gear lever, when the bus's model has one near the seat, and what the hand
     /// working it is doing.
@@ -314,6 +318,10 @@ pub struct DriverFigure {
 /// numbered as in `omsi_sim::human` (thighs 0-1, shins 2-3, upper arms 4-5, forearms 6-7).
 const UPPER_ARM_SLOT: [usize; 2] = [4, 5];
 const FORE_ARM_SLOT: [usize; 2] = [6, 7];
+
+/// The head bone slot in `Posed::bones` (hip 8, main 9, head 10, hands 11-12, feet 13-14,
+/// toes 15-16, numbered as in `omsi_sim::human`) (local modification).
+const HEAD_SLOT: usize = 10;
 
 /// A hand on the rim: the point it holds, as an angle on the wheel (the angle seen from the
 /// seat less the wheel's), or its way to a new hold.
@@ -493,6 +501,22 @@ impl DriverFigure {
                     .collect()
             })
             .collect();
+        let head_of: Vec<Vec<bool>> = ty
+            .meshes
+            .iter()
+            .map(|m| {
+                m.skin
+                    .iter()
+                    .map(|inf| {
+                        let w: f32 = (0..inf.n.max(1) as usize)
+                            .filter(|&j| inf.slot[j] as usize == HEAD_SLOT)
+                            .map(|j| if inf.n <= 1 { 1.0 } else { inf.weight[j] })
+                            .sum();
+                        w > 0.5
+                    })
+                    .collect()
+            })
+            .collect();
         let grip_rest = grip_centres(&ty, GRIP_RADIUS);
         let mut f = DriverFigure {
             ty,
@@ -527,6 +551,7 @@ impl DriverFigure {
             rolls: [None; 2],
             hand_of,
             arm_of,
+            head_of,
             blend: Default::default(),
             shifter: None,
             shift: ShiftState::default(),
@@ -789,34 +814,33 @@ impl DriverFigure {
                 skin_from(m, &self.curled[k], &posed.bones, pos, nrm);
             }
 
-            // Keep the hands and forearms in the cab. Collapse each upper arm onto its
-            // posed elbow so the joining triangles close there instead of stretching back
-            // towards the shoulder. Other views use the complete, freshly skinned figure.
+            // Local modification: keep the whole figure in the cab but the head. The eyes
+            // sit inside the head, so keeping it would fill the view with the inside of the
+            // mesh; the body itself sits clear of the camera (the seat poses the figure to
+            // the wheel without clipping). Fold every vertex weighted to the head bone onto
+            // the head's own centre, so its triangles shrink to nothing there. (The stock
+            // game keeps only the hands and forearms, folding each upper arm onto its posed
+            // elbow and the rest of the body onto the nearest elbow.) Other views use the
+            // complete, freshly skinned figure.
             if mirror_only && self.show_hands_in_cab {
-                let (hand_of, arm_of) = (&self.hand_of[k], &self.arm_of[k]);
-                let count = pos.len().min(hand_of.len()).min(arm_of.len());
-                for i in 0..count {
-                    if hand_of[i] >= 0 {
-                        continue;
-                    }
-                    let inf = &m.skin[i];
-                    if arm_of[i] >= 0 {
-                        let side = arm_of[i] as usize;
-                        let upper: f32 = (0..inf.n.max(1) as usize)
-                            .filter(|&j| inf.slot[j] as usize == UPPER_ARM_SLOT[side])
-                            .map(|j| if inf.n <= 1 { 1.0 } else { inf.weight[j] })
-                            .sum();
-                        if upper > 0.5 {
-                            pos[i] = posed.elbow[side];
+                let head_of = self.head_of.get(k).map(|v| v.as_slice());
+                if let Some(head_of) = head_of {
+                    let count = pos.len().min(head_of.len());
+                    let mut hd_sum = Vec3::ZERO;
+                    let mut hd_n = 0.0f32;
+                    for i in 0..count {
+                        if head_of[i] {
+                            hd_sum += pos[i];
+                            hd_n += 1.0;
                         }
-                    } else {
-                        let here = pos[i];
-                        pos[i] = posed
-                            .elbow
-                            .iter()
-                            .copied()
-                            .min_by(|a, b| a.distance_squared(here).total_cmp(&b.distance_squared(here)))
-                            .unwrap_or(here);
+                    }
+                    if hd_n > 0.0 {
+                        let anchor = hd_sum / hd_n;
+                        for i in 0..count {
+                            if head_of[i] {
+                                pos[i] = anchor;
+                            }
+                        }
                     }
                 }
             }
